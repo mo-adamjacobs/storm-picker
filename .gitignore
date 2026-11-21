@@ -1,0 +1,16 @@
+# Python / uv
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Strike data and saved analyses stay local (see README: data licensing)
+data/
+analyses/
+
+# Build output. The Pyodide wheel is built by CI for GitHub Pages
+# (sweep/build-pyodide.sh builds it locally).
+sweep/target/
+sweep/.pyodide_build/
+lightning/static/wheels/
+_site/

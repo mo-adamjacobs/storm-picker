@@ -1,0 +1,17 @@
+[package]
+name = "lightning-sweep"
+version = "0.1.0"
+edition = "2021"
+description = "Fast exact 2-parameter single-linkage region sweep for lightning-persistence"
+
+[lib]
+name = "lightning_sweep"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30.1", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = true

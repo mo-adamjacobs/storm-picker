@@ -1,0 +1,22 @@
+[project]
+name = "lightning-persistence"
+version = "0.1.0"
+description = "Explore lightning with geographic-distance / time-gap bifiltrations"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2", "scipy>=1.12", "lightning-sweep"]
+
+[project.scripts]
+lightning-explorer = "lightning.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["lightning"]
+
+[tool.setuptools.package-data]
+lightning = ["static/*", "static/wheels/*"]
+
+[tool.uv.sources]
+lightning-sweep = { path = "sweep" }
