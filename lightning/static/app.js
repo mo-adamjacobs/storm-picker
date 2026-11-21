@@ -1,12 +1,14 @@
 "use strict";
-// Lightning persistence explorer front end. No dependencies.
+// Storm picker front end. No dependencies.
 
 const $ = (id) => document.getElementById(id);
 const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const SERIES = {
-  light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"],
-  dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9", "#e66767"],
+  light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948",
+          "#0e9aa7", "#8b5a2b", "#7aa81e", "#b5359b", "#27408b", "#8e2c3e", "#c49a5a"],
+  dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9", "#e66767",
+         "#23b5c2", "#b07a45", "#93c43a", "#d158b8", "#6f86d6", "#c2566a", "#d6b072"],
 };
 const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
               "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
@@ -26,6 +28,8 @@ function call(cmd, ...args) {
 }
 worker.onmessage = (ev) => {
   const m = ev.data;
+  if (m.type === "saveProgress") { $("s-bar").value = m.fraction; return; }
+  if (m.type === "openProgress") { $("open-bar").value = m.fraction; return; }
   if (m.type === "progress") return showJob({ status: "running", stage: m.stage, fraction: m.fraction });
   if (m.type === "status") { $("py-status").textContent = m.text; $("py-status").hidden = !m.text; return; }
   if (m.type === "warning") { console.warn(m.text); $("py-warning").textContent = m.text; $("py-warning").hidden = false; return; }
@@ -51,6 +55,7 @@ let pick = null;      // isolated feature index (into sel.features) or null
 let countImg = null;  // persistence-map count image cache
 let sim = null;      // similar-cluster set for the picked cluster (from /similar)
 let tLo = 0, tHi = 1; // shown fraction of the time range
+let vLo = 0, vHi = 1; // part of the time range the slider spans (scroll on it to zoom)
 
 // ---------------------------------------------------------------- canvases
 function fitCanvas(c) {
@@ -237,13 +242,13 @@ $("pers").addEventListener("click", async (ev) => {
   $("sel-head").textContent = "Selecting…";
   try {
     sel = await call("select", p.x, p.y);
-    pick = null; sim = null;
-    renderFeatures(); drawPers(); drawMap(); writeHash();
+    pick = null; sim = null; stab = [];
+    renderFeatures(); drawPers(); drawMap(); writeHash(); loadStability();
   } catch (e) { $("sel-head").textContent = e.message; }
 });
 
 // ---------------------------------------------------------------- features list
-const NAMED = 8; // fixed-order categorical slots; further clusters are drawn neutral
+const NAMED = 15; // fixed-order categorical slots (stability is computed for these); others neutral
 function featureColor(idx) {
   return idx != null && idx < NAMED ? palette()[idx] : null;
 }
@@ -256,27 +261,45 @@ function extraShade(col) {
   return col === css("--selected") ? mix(col, css("--surface-1"), 0.5) : mix(col, dark() ? "#ffffff" : "#000000", 0.4);
 }
 
-// Diagonal span of a cluster through the selected point, as threshold pairs.
-function spanText(below, above) {
-  const p = A.meta.params, x = sel.x, y = sel.y;
-  const at = (s) => `${fmtNum((x + s) * p.max_km)} km, ${fmtNum((y + s) * p.max_min)} min`;
-  const edge = above >= Math.min(1 - x, 1 - y) - 1e-9;
-  return `${at(-below)} → ${edge ? "box edge" : at(above)}`;
+// Change tolerance in %, kept below 100: then similar clusters' regions never overlap,
+// which is what makes the stability area exact.
+const TOL_MAX = 99;
+const tolPct = () => Math.min(TOL_MAX, Math.max(0, +$("tol").value || 0));
+
+// Stability of list row idx: from the coloured clusters' run, or the picked cluster's
+// similar-cluster query. "" for rows that get none.
+function stabilityText(f, idx) {
+  let v = stab[idx];
+  if (v == null && idx === pick && sim && sim.cluster === f.cluster) v = sim.error ? { error: sim.error } : sim.stability;
+  if (v == null) return idx < NAMED || idx === pick ? "stability …" : "";
+  if (v.error) return v.error;
+  const pct = v * 100;
+  return `stability <b>${pct >= 1 ? fmtNum(pct) : fmtNum(pct, 2)}%</b>`;
 }
 
-function similarText(f) {
-  const tol = +$("tol").value;
-  if (!sim || sim.cluster !== f.cluster) return `clusters within ${fmtNum(tol)}% change: computing…`;
-  if (sim.error) return sim.error;
-  return `clusters within ${fmtNum(tol)}% change: ${fmtNum(sim.count, 0)} (${fmtNum(sim.min_size, 0)}–` +
-    `${fmtNum(sim.max_size, 0)} strikes), ${spanText(sim.below, sim.above)}`;
+// Stability of the coloured clusters, largest first, one worker call at a time so the
+// picked cluster's query can run in between. Restarted when the point or tolerance changes.
+let stab = [], stabSeq = 0;
+async function loadStability() {
+  const seq = ++stabSeq;
+  stab = [];
+  if (!sel) return;
+  const tol = tolPct() / 100, s = sel;
+  for (let idx = 0; idx < Math.min(NAMED, s.features.length); idx++) {
+    let v;
+    try { v = await call("stability", s.features[idx].cluster, s.x, s.y, tol); }
+    catch (e) { v = { error: e.message }; }
+    if (seq !== stabSeq) return; // a newer point or tolerance superseded this run
+    stab[idx] = v;
+    renderFeatures();
+  }
 }
 
 // Fetch the clusters within the change tolerance of the picked one (exact, server-side).
 let simSeq = 0;
 async function loadSimilar() {
   if (!sel || pick == null) return;
-  const f = sel.features[pick], seq = ++simSeq, tol = Math.max(0, +$("tol").value) / 100;
+  const f = sel.features[pick], seq = ++simSeq, tol = tolPct() / 100;
   try {
     const r = await call("similar", f.cluster, sel.x, sel.y, tol);
     if (seq !== simSeq) return; // a newer request superseded this one
@@ -285,39 +308,79 @@ async function loadSimilar() {
     if (seq !== simSeq) return;
     sim = { cluster: f.cluster, error: e.message };
   }
-  renderFeatures(); drawPers();
+  renderFeatures(); drawPers(); drawMap(); // drawMap also draws the slider's cluster bands
 }
 let tolTimer = null;
+$("tol").addEventListener("change", () => { // tidy what was typed once editing ends
+  if (+$("tol").value !== tolPct()) $("tol").value = tolPct();
+});
 $("tol").addEventListener("input", () => {
   clearTimeout(tolTimer);
-  tolTimer = setTimeout(() => { sim = null; renderFeatures(); drawPers(); writeHash(); loadSimilar(); }, 250);
+  tolTimer = setTimeout(() => {
+    sim = null; stab = []; renderFeatures(); drawPers(); writeHash(); loadSimilar(); loadStability();
+  }, 250);
 });
 
-// Download a cluster (plus strikes of similar clusters, tagged with their similarity).
-async function saveCluster(f, btn) {
-  const tol = Math.max(0, +$("tol").value) / 100;
-  btn.disabled = true; btn.textContent = "Saving…";
-  try {
-    const json = await call("clusterGeojson", f.cluster, sel.x, sel.y, tol);
-    const p = A.meta.params, a = document.createElement("a"), num = (v) => +v.toFixed(1);
-    a.href = URL.createObjectURL(new Blob([json], { type: "application/geo+json" }));
-    a.download = `cluster-${A.meta.id}-${f.size}strikes-${num(sel.x * p.max_km)}km-` +
-      `${num(sel.y * p.max_min)}min-${num(tol * 100)}pct.geojson`;
-    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-  } catch (e) {
-    $("sel-head").textContent = `Could not save the cluster: ${e.message}`;
-  } finally { btn.disabled = false; btn.textContent = "Save"; }
+// Save a cluster (plus strikes of similar clusters, tagged with their similarity) as
+// GeoJSON: ask for a title, then a file location, then build it in the worker.
+let saveJob = null; // {f, x, y, tol} of the cluster the save dialog is for
+function saveCluster(f) {
+  const p = A.meta.params, tol = tolPct() / 100;
+  saveJob = { f, x: sel.x, y: sel.y, tol };
+  const at = `${fmtNum(sel.x * p.max_km)} km, ${fmtNum(sel.y * p.max_min)} min`;
+  const src = A.meta.source?.name || p.file;
+  $("s-title").value = `${src}: cluster of ${fmtNum(f.size, 0)} strikes at ${at}, change ≤ ${fmtNum(tol * 100)}%`;
+  $("s-info").textContent = `${f.start.slice(0, 19).replace("T", " ")} → ${f.end.slice(0, 19).replace("T", " ")}. ` +
+    `Includes the extra strikes of clusters within ${fmtNum(tol * 100)}% change.`;
+  $("s-status").textContent = ""; $("s-error").textContent = "";
+  $("s-save").disabled = false; $("s-bar").hidden = true;
+  $("dlg-save").showModal();
+  $("s-title").select();
 }
+$("s-cancel").onclick = () => $("dlg-save").close();
+$("form-save").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const job = saveJob, title = $("s-title").value.trim(), p = A.meta.params;
+  if (!job || !title) return;
+  const num = (v) => +v.toFixed(1);
+  const name = `cluster-${job.f.size}strikes-${num(job.x * p.max_km)}km-${num(job.y * p.max_min)}min-` +
+    `${num(job.tol * 100)}pct.geojson`;
+  // The file picker must open straight from the click, so choose the file first.
+  let handle = null;
+  if (window.showSaveFilePicker) {
+    try {
+      handle = await showSaveFilePicker({ suggestedName: name,
+        types: [{ description: "GeoJSON", accept: { "application/geo+json": [".geojson"] } }] });
+    } catch (e) { if (e.name === "AbortError") return; throw e; }
+  }
+  $("s-save").disabled = true; $("s-error").textContent = "";
+  $("s-status").textContent = "Building GeoJSON…";
+  $("s-bar").value = 0; $("s-bar").hidden = false;
+  try {
+    const json = await call("clusterGeojson", job.f.cluster, job.x, job.y, job.tol, title);
+    $("s-status").textContent = "Writing file…"; $("s-bar").removeAttribute("value");
+    if (handle) {
+      const w = await handle.createWritable();
+      await w.write(json); await w.close();
+    } else { // browsers without a save picker: an ordinary download
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([json], { type: "application/geo+json" }));
+      a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+    $("dlg-save").close();
+  } catch (e) {
+    $("s-error").textContent = `Could not save the cluster: ${e.message}`;
+    $("s-status").textContent = "";
+  } finally { $("s-save").disabled = false; $("s-bar").hidden = true; }
+});
 
 function renderFeatures() {
   const ul = $("features"); ul.innerHTML = "";
   if (!sel) return;
   const p = A.meta.params;
   $("sel-head").innerHTML =
-    `At <b>${fmtNum(sel.x * p.max_km)} km</b>, <b>${fmtNum(sel.y * p.max_min)} min</b>: ` +
-    `${fmtNum(sel.features.length, 0)} clusters of 2+ strikes, ${fmtNum(sel.singletons, 0)} isolated strikes.` +
-    (sel.missing ? ` <b>${sel.missing} clusters had no stored region (bug).</b>` : "") +
-    ` <span class="muted">Colours: largest ${NAMED}; others grey. Spans run along the diagonal through the point. Change = strikes in only one of two clusters, per shared strike.</span>`;
+    `At <b>${fmtNum(sel.x * p.max_km)} km</b>, <b>${fmtNum(sel.y * p.max_min)} min</b>` +
+    (sel.missing ? ` <b>${sel.missing} clusters had no stored region (bug).</b>` : "");
   const frag = document.createDocumentFragment();
   const rows = sel.features.map((f, idx) => [f, idx]).filter(([, idx]) => idx < 500 || idx === pick);
   rows.forEach(([f, idx]) => {
@@ -326,14 +389,16 @@ function renderFeatures() {
     const sw = document.createElement("span"); sw.className = "sw";
     sw.style.background = idx === pick ? pickColor(idx) : featureColor(idx) || css("--strike-dim");
     const main = document.createElement("div");
+    const sec = (Date.parse(f.end) - Date.parse(f.start)) / 1000;
+    const rate = sec > 0 ? ` · ${fmtNum(f.size / (sec / 60))} strikes/min` : "";
+    const st = stabilityText(f, idx);
     main.innerHTML = `<b>${fmtNum(f.size, 0)} strikes</b>` +
-      `<div class="small muted">${f.start.slice(5, 19).replace("T", " ")} → ${f.end.slice(5, 19).replace("T", " ")}</div>` +
-      `<div class="small muted">exact set: ${spanText(f.below, f.above)}</div>` +
-      (idx === pick ? `<div class="small muted">${similarText(f)}</div>` : "");
+      `<div class="small muted">${sec < 60 ? `${fmtNum(sec)} s` : fmtDur(sec)}${rate}</div>` +
+      (st ? `<div class="small muted">${st}</div>` : "");
     const save = document.createElement("button");
     save.className = "small"; save.textContent = "Save";
     save.title = "Save this cluster as GeoJSON, with the extra strikes of clusters within the change tolerance";
-    save.addEventListener("click", (ev) => { ev.stopPropagation(); saveCluster(f, save); });
+    save.addEventListener("click", (ev) => { ev.stopPropagation(); saveCluster(f); });
     save.addEventListener("dblclick", (ev) => ev.stopPropagation());
     li.append(sw, main, save);
     li.addEventListener("click", (ev) => {
@@ -434,20 +499,49 @@ function pickExtent() {
   const frac = (iso) => (Date.parse(iso) / 1000 - A.t0) / T;
   return [Math.max(0, frac(f.start)), Math.min(1, frac(f.end))];
 }
-function drawPickBand() {
-  const band = $("t-pick"), ext = pickExtent();
-  band.hidden = !ext;
-  if (!ext) return;
-  band.style.left = `${ext[0] * 100}%`;
-  band.style.width = `${(ext[1] - ext[0]) * 100}%`;
-  band.style.background = pickColor(pick);
+// Time extent of the picked cluster's similar clusters (their union), or null.
+function simExtent() {
+  if (!A || !sel || pick == null || !sim || sim.cluster !== sel.features[pick].cluster || !sim.union) return null;
+  const T = A.t[A.t.length - 1] || 1;
+  let lo = Infinity, hi = -Infinity;
+  for (const v of sim.union) { const t = A.t[v]; if (t < lo) lo = t; if (t > hi) hi = t; }
+  return lo <= hi ? [lo / T, hi / T] : null;
 }
-// Restrict the shown time range to the picked cluster's extent.
+function drawPickBand() {
+  // The cluster's extent, over a wider band in the similar-strike shade for its similar
+  // clusters' extent.
+  for (const [id, ext, col] of [["t-pick", pickExtent(), () => pickColor(pick)],
+                                ["t-sim", simExtent(), () => extraShade(pickColor(pick))]]) {
+    const band = $(id);
+    band.hidden = !ext || ext[1] < vLo || ext[0] > vHi;
+    if (band.hidden) continue;
+    const a = clamp01(viewPos(ext[0])), b = clamp01(viewPos(ext[1]));
+    band.style.left = `${a * 100}%`;
+    band.style.width = `${(b - a) * 100}%`;
+    band.style.background = col();
+  }
+}
+// Double-click on a cluster: frame its strikes on the map and restrict the shown time
+// range to its extent (zooming the slider in if the cluster is short).
 function zoomToPick() {
   const ext = pickExtent();
   if (!ext) return;
   const pad = Math.max(1e-4, (ext[1] - ext[0]) * 0.02); // a sliver either side so edge strikes show
-  setRange(ext[0] - pad, ext[1] + pad);
+  const lo = ext[0] - pad, hi = ext[1] + pad, len = hi - lo;
+  if (len < 0.2 * (vHi - vLo) || lo < vLo || hi > vHi) setView(lo - len, hi + len); // range takes ~1/3
+  setRange(lo, hi);
+  frameOnMap();
+}
+function frameOnMap() {
+  if (!LM || !sel || pick == null) return;
+  const comp = sel.features[pick].component;
+  let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
+  for (let i = 0; i < sel.label.length; i++) {
+    if (sel.label[i] !== comp) continue;
+    a = Math.min(a, A.lon[i]); b = Math.max(b, A.lon[i]); c = Math.min(c, A.lat[i]); d = Math.max(d, A.lat[i]);
+  }
+  if (a > b) return;
+  LM.fitBounds([[c, a], [d, b]], { padding: [24, 24], maxZoom: 12 });
 }
 
 function drawMap() {
@@ -515,12 +609,28 @@ function drawMap() {
 
 // Time-range slider: drag either handle to resize, drag the middle to slide a fixed-length
 // window, click the track to centre the window there. Arrow keys nudge (Shift: 10x).
+// Position on the slider (0..1) of a fraction of the full time range, given the view.
+const viewPos = (f) => (f - vLo) / (vHi - vLo);
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
 function layoutRange() {
-  $("t-lo").style.left = `${tLo * 100}%`;
-  $("t-hi").style.left = `${tHi * 100}%`;
-  $("t-sel").style.left = `${tLo * 100}%`;
-  $("t-sel").style.width = `${(tHi - tLo) * 100}%`;
+  const a = viewPos(tLo), b = viewPos(tHi);
+  for (const [id, p] of [["t-lo", a], ["t-hi", b]]) {
+    $(id).style.left = `${clamp01(p) * 100}%`;
+    $(id).classList.toggle("out", p < 0 || p > 1); // beyond the zoomed view: parked at the end
+  }
+  $("t-sel").style.left = `${clamp01(a) * 100}%`;
+  $("t-sel").style.width = `${(clamp01(b) - clamp01(a)) * 100}%`;
+  $("t-more-l").hidden = vLo <= 0;
+  $("t-more-r").hidden = vHi >= 1;
   for (const [id, v] of [["t-lo", tLo], ["t-hi", tHi]]) $(id).setAttribute("aria-valuenow", Math.round(v * 1000));
+  if (A) drawPickBand();
+}
+const MIN_VIEW = 1e-5; // narrowest slider view, as a fraction of the time range
+function setView(lo, hi) {
+  let len = Math.min(1, Math.max(MIN_VIEW, hi - lo));
+  lo = Math.min(1 - len, Math.max(0, lo));
+  vLo = lo; vHi = lo + len;
+  layoutRange();
 }
 function setRange(lo, hi, slide = false) {
   if (slide) { // keep the length: push back from the ends
@@ -533,7 +643,15 @@ function setRange(lo, hi, slide = false) {
 }
 (function initRange() {
   const box = $("trange");
-  const frac = (ev) => { const r = box.getBoundingClientRect(); return (ev.clientX - r.left) / r.width; };
+  // Pointer position as a fraction of the full time range (through the zoomed view).
+  const frac = (ev) => { const r = box.getBoundingClientRect(); return vLo + (ev.clientX - r.left) / r.width * (vHi - vLo); };
+  box.addEventListener("wheel", (ev) => { // zoom the view around the pointer
+    if (!A) return;
+    ev.preventDefault();
+    const c = frac(ev), len = vHi - vLo;
+    const next = Math.min(1, Math.max(MIN_VIEW, len * Math.exp(ev.deltaY * 0.0015)));
+    setView(c - (c - vLo) * next / len, c - (c - vLo) * next / len + next);
+  }, { passive: false });
   let drag = null;
   const start = (mode) => (ev) => {
     ev.preventDefault(); ev.stopPropagation();
@@ -560,7 +678,7 @@ function setRange(lo, hi, slide = false) {
   box.addEventListener("pointerup", end); box.addEventListener("pointercancel", end);
   for (const id of ["t-lo", "t-hi"]) {
     $(id).addEventListener("keydown", (ev) => {
-      const step = (ev.shiftKey ? 0.01 : 0.001) * (ev.key === "ArrowLeft" ? -1 : ev.key === "ArrowRight" ? 1 : 0);
+      const step = (ev.shiftKey ? 0.01 : 0.001) * (vHi - vLo) * (ev.key === "ArrowLeft" ? -1 : ev.key === "ArrowRight" ? 1 : 0);
       if (!step) return;
       ev.preventDefault();
       if (id === "t-lo") setRange(Math.min(tLo + step, tHi), tHi); else setRange(tLo, Math.max(tHi + step, tLo));
@@ -572,9 +690,12 @@ function setRange(lo, hi, slide = false) {
 // ---------------------------------------------------------------- open / new
 async function openAnalysis(id) {
   $("current").textContent = "Loading…";
+  // Indeterminate until the worker reports (it may still be starting Python).
+  const bar = $("open-bar"); bar.removeAttribute("value"); bar.hidden = false;
   try { A = await call("open", id); }
   catch (e) {
-    A = null; sel = null; pick = null; sim = null;
+    bar.hidden = true;
+    A = null; sel = null; pick = null; sim = null; stab = []; stabSeq++;
     $("view").hidden = true; $("empty").hidden = false;
     $("current").textContent = /NotFound|could not be found/i.test(e.message)
       ? "That analysis isn't saved in this browser (links from the old server version won't work)."
@@ -582,7 +703,8 @@ async function openAnalysis(id) {
     history.replaceState(null, "", location.pathname);
     return false;
   }
-  sel = null; pick = null; countImg = null; tLo = 0; tHi = 1;
+  bar.hidden = true;
+  sel = null; pick = null; countImg = null; tLo = 0; tHi = 1; vLo = 0; vHi = 1; stab = []; stabSeq++;
   sim = null;
   layoutRange();
   $("empty").hidden = true; $("view").hidden = false;
@@ -726,9 +848,9 @@ async function readHash() {
     if (h.has("x") && h.has("y")) {
       sel = await call("select", +h.get("x"), +h.get("y"));
       pick = h.has("f") && +h.get("f") < sel.features.length ? +h.get("f") : null;
-      if (h.has("tol")) $("tol").value = h.get("tol");
+      if (h.has("tol")) $("tol").value = Math.min(TOL_MAX, Math.max(0, +h.get("tol") || 0));
       await new Promise((r) => requestAnimationFrame(r));
-      renderFeatures(); drawPers(); drawMap(); loadSimilar();
+      renderFeatures(); drawPers(); drawMap(); loadSimilar(); loadStability();
     }
   } catch (e) { $("current").textContent = e.message; }
 }

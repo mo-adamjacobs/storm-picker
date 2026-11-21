@@ -229,7 +229,8 @@ def _overlaps_python(n, i, j, dist, gap, max_dist, marked, zob, similar=None):
     merges like size. Exact; used to compare one chosen cluster against all others.
 
     If `similar(key, overlap)` is given, also returns a boolean mask of the union of all
-    strikes in clusters it accepts, collected as each such cluster forms.
+    strikes in clusters it accepts, collected as each such cluster forms, and per strike
+    the highest Jaccard similarity |C and D| / |C or D| of an accepted D holding it.
     """
     T = Dendrogram(n, zob, max_dist)
     T.cnt = [1 if m else 0 for m in marked]
@@ -237,30 +238,33 @@ def _overlaps_python(n, i, j, dist, gap, max_dist, marked, zob, similar=None):
     i, j, dist = i.tolist(), j.tolist(), dist.tolist()
     out = {}
     union = np.zeros(n, bool)
-    done = {}  # node -> True if every leaf under it is already in `union` (reset on change)
+    best = np.zeros(n)
+    c_size = sum(T.cnt[:n])
+    cover = {}  # node -> every leaf under it already has best >= this (reset on change)
 
-    def collect(w):
-        # Every node visited here ends up with all its leaves in `union`: mark them all.
+    def collect(w, jac):
+        # Every node visited here ends up with all its leaves at >= jac.
         stack = [w]
         while stack:
             v = stack.pop()
             if v < n:
                 union[v] = True
-            elif not done.get(v):
-                done[v] = True
+                best[v] = max(best[v], jac)
+            elif cover.get(v, -1.0) < jac:
+                cover[v] = jac
                 stack.extend(T.kids[v])
 
     for e in order:
         chain = T.insert(i[e], j[e], dist[e], lambda w: None)
         for w in chain:
-            done.pop(w, None)  # its subtree just changed
+            cover.pop(w, None)  # its subtree just changed
         for w in chain:
             if T.cnt[w]:
                 k = T.key(w)
                 out[k] = T.cnt[w]
                 if similar is not None and similar(k, T.cnt[w]):
-                    collect(w)
-    return (out, union) if similar is not None else out
+                    collect(w, T.cnt[w] / (c_size + k[1] - T.cnt[w]))
+    return (out, union, best) if similar is not None else out
 
 
 def cluster_regions(n, i, j, dist, gap, max_dist, min_size=2, zob=None, progress=None, backend=None):
@@ -278,12 +282,13 @@ def cluster_regions(n, i, j, dist, gap, max_dist, min_size=2, zob=None, progress
 
 
 def overlaps(n, i, j, dist, gap, max_dist, marked, zob, c_size, tol, sorted_hash, sorted_size,
-             backend=None):
+             backend=None, progress=None):
     """Clusters similar to one cluster C (its strikes `marked`, |C| = c_size).
 
-    Returns ({(hash, size): |C and D|}, union mask) for the clusters D whose change
+    Returns ({(hash, size): |C and D|}, union mask, best) for the clusters D whose change
     |C xor D| / |C and D| is at most `tol` and which are real regions (present in the
-    (hash, size) table, sorted by hash then size); the mask is the union of their strikes.
+    (hash, size) table, sorted by hash then size); the mask is the union of their strikes,
+    and best[s] is the highest Jaccard similarity to C of those D containing strike s.
     """
     sorted_hash = np.ascontiguousarray(sorted_hash, np.int64)
     sorted_size = np.ascontiguousarray(sorted_size, np.int64)
@@ -293,13 +298,14 @@ def overlaps(n, i, j, dist, gap, max_dist, marked, zob, c_size, tol, sorted_hash
             hi = np.searchsorted(sorted_hash, k[0], "right")
             return bool((sorted_size[lo:hi] == k[1]).any())
         accept = lambda k, o: (c_size + k[1] - 2 * o) / o <= tol + 1e-12 and exists(k)
-        ov, union = _overlaps_python(n, i, j, dist, gap, max_dist, marked, zob, similar=accept)
-        return {k: o for k, o in ov.items() if accept(k, o)}, union
-    h, z, cnt, union = _native.overlaps(
+        ov, union, best = _overlaps_python(n, i, j, dist, gap, max_dist, marked, zob, similar=accept)
+        return {k: o for k, o in ov.items() if accept(k, o)}, union, best
+    h, z, cnt, union, best = _native.overlaps(
         np.ascontiguousarray(i, np.int32), np.ascontiguousarray(j, np.int32),
         np.ascontiguousarray(dist, np.float64), np.ascontiguousarray(gap, np.float64),
         float(max_dist), np.ascontiguousarray(zob, np.int64),
-        np.ascontiguousarray(marked, np.uint8), int(c_size), float(tol), sorted_hash, sorted_size)
+        np.ascontiguousarray(marked, np.uint8), int(c_size), float(tol), sorted_hash, sorted_size,
+        progress)
     h, z, cnt = (np.frombuffer(b, np.int64) for b in (h, z, cnt))
     return ({(int(a), int(b)): int(c) for a, b, c in zip(h, z, cnt)},
-            np.frombuffer(union, np.uint8).astype(bool))
+            np.frombuffer(union, np.uint8).astype(bool), np.frombuffer(best, np.float64).copy())

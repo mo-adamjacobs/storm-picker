@@ -12,6 +12,7 @@ import io
 import json
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 
 import numpy as np
@@ -22,6 +23,40 @@ from .graph import thinned_edges
 from .regions import cluster_regions, overlaps, strike_tags
 
 FORMAT = 4
+
+
+class _Counted:
+    """Write-only file wrapper that reports each write's size."""
+
+    def __init__(self, f, report):
+        self.f, self.report = f, report
+
+    def write(self, b):
+        self.f.write(b)
+        self.report(len(b))
+        return len(b)
+
+
+def savez(arrays, progress=None, stored=(), level=6):
+    """Bytes of an .npz holding `arrays` (as np.savez_compressed writes it), reporting the
+    fraction written to progress(f). Names in `stored` are not compressed (random data)."""
+    total = max(1, sum(np.asarray(a).nbytes for a in arrays.values()))
+    done = 0
+
+    def report(k):
+        nonlocal done
+        done += k
+        if progress:
+            progress(min(1.0, done / total))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", allowZip64=True) as zf:
+        for name, a in arrays.items():
+            info = zipfile.ZipInfo(name + ".npy", (1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED if name in stored else zipfile.ZIP_DEFLATED
+            info.compress_level = level
+            with zf.open(info, "w", force_zip64=True) as f:
+                np.lib.format.write_array(_Counted(f, report), np.asanyarray(a), allow_pickle=False)
+    return buf.getvalue()
 
 
 def iso(ts):
@@ -61,7 +96,7 @@ def run(params, t, lat, lon, source, progress=lambda stage, frac=None: None, pro
     zob = strike_tags(n)
     regions = cluster_regions(n, i, j, d, g, km, zob=zob, progress=lambda f: progress(stage, f))
 
-    progress("Saving")
+    progress("Saving", 0)
     summary = {
         "id": datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6],
         "format": FORMAT, "created": iso(time.time()), "params": params,
@@ -74,12 +109,13 @@ def run(params, t, lat, lon, source, progress=lambda stage, frac=None: None, pro
         enc = [p.encode() for p in props]
         extra["props"] = np.frombuffer(b"".join(enc), np.uint8)
         extra["props_off"] = np.concatenate([[0], np.cumsum([len(b) for b in enc])]).astype(np.int64)
-    buf = io.BytesIO()
-    np.savez_compressed(
-        buf, meta=np.frombuffer(json.dumps(summary).encode(), np.uint8),
+    blob = savez(dict(
+        meta=np.frombuffer(json.dumps(summary).encode(), np.uint8),
         t=t, lat=lat, lon=lon, zob=zob, ei=i, ej=j, ed=d, eg=g,
-        c_hash=regions.hash, c_size=regions.size, rows=regions.rows, row_off=regions.off, **extra)
-    return summary, buf.getvalue()
+        c_hash=regions.hash, c_size=regions.size, rows=regions.rows, row_off=regions.off, **extra),
+        # Level 1: 4x faster than the default 6 for files about 7% larger.
+        progress=lambda f: progress("Saving", f), stored=("zob", "c_hash"), level=1)
+    return summary, blob
 
 
 def read_summary(data: bytes):
@@ -96,17 +132,30 @@ def read_summary(data: bytes):
 class Loaded:
     """An analysis held in memory for interactive queries."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, progress=None):
+        """progress(f), if given, is called with the fraction done as loading proceeds."""
+        report = progress or (lambda f: None)
         self.meta = read_summary(data)
         z = np.load(io.BytesIO(data))
-        self.t, self.lat, self.lon, self.zob = z["t"], z["lat"], z["lon"], z["zob"]
-        self.ei, self.ej, self.ed, self.eg = z["ei"], z["ej"], z["ed"], z["eg"]
-        self.rows, self.off = z["rows"], z["row_off"]
-        self.size = z["c_size"]
-        self.hash = z["c_hash"]
-        self.props = (z["props"], z["props_off"]) if "props" in z.files else None
+        # Decompressing is about half the work: report it by uncompressed size.
+        sizes = {i.filename[:-4]: i.file_size for i in z.zip.infolist()}
+        total, done = max(1, sum(sizes.values())), 0
+
+        def get(name):
+            nonlocal done
+            a = z[name]
+            done += sizes.get(name, 0)
+            report(0.5 * done / total)
+            return a
+        self.t, self.lat, self.lon, self.zob = get("t"), get("lat"), get("lon"), get("zob")
+        self.ei, self.ej, self.ed, self.eg = get("ei"), get("ej"), get("ed"), get("eg")
+        self.rows, self.off = get("rows"), get("row_off")
+        self.size = get("c_size")
+        self.hash = get("c_hash")
+        self.props = (get("props"), get("props_off")) if "props" in z.files else None
         # (hash, size) -> cluster id by binary search, instead of a huge Python dict.
         self._by_hash = np.lexsort((self.size, self.hash))
+        report(0.75)
         self._hash_sorted = self.hash[self._by_hash]
         self._size_sorted = self.size[self._by_hash]
         p = self.meta["params"]
@@ -115,6 +164,7 @@ class Loaded:
         # Components with every kept edge present: no cluster ever spans two of these.
         _, self.full = connected_components(
             coo_matrix((np.ones(len(self.ei)), (self.ei, self.ej)), shape=(self.n, self.n)), directed=False)
+        report(1.0)
 
     def lookup(self, hashes, sizes):
         """Cluster ids for (hash, size) pairs; -1 where there is no such cluster."""
@@ -153,9 +203,8 @@ class Loaded:
         return ncomp, label, np.bincount(label, minlength=ncomp), h
 
     def select(self, x, y):
-        """Exact clusters at normalized point (x, y), each with its region id and its span
-        along the diagonal through (x, y): how far both thresholds can shrink before it
-        splits and grow before it merges."""
+        """Exact clusters at normalized point (x, y), each with its region id, size and
+        time extent."""
         ncomp, label, sizes, h = self._components(x, y)
         tmin = np.full(ncomp, np.inf); np.minimum.at(tmin, label, self.t)
         tmax = np.full(ncomp, -np.inf); np.maximum.at(tmax, label, self.t)
@@ -166,9 +215,8 @@ class Loaded:
             if cid < 0:  # would mean a bug: every non-singleton cluster has a region
                 missing += 1
                 continue
-            lo, hi = self._diagonal([cid], x, y)
             feats.append({"component": int(c), "cluster": int(cid), "size": int(sizes[c]),
-                          "start": iso(tmin[c]), "end": iso(tmax[c]), "below": lo, "above": hi})
+                          "start": iso(tmin[c]), "end": iso(tmax[c])})
         feats.sort(key=lambda f: (-f["size"], f["start"]))
         return {"x": x, "y": y, "components": int(ncomp), "singletons": int((sizes == 1).sum()),
                 "label": label.astype(np.int32), "features": feats, "missing": missing}
@@ -181,20 +229,23 @@ class Loaded:
             raise ValueError("That cluster does not exist at the selected point")
         return label == hit[0]
 
-    def similar(self, cid, x, y, tol):
+    def similar(self, cid, x, y, tol, progress=None):
         """Clusters D whose change from cluster C (the cluster `cid`, which exists at (x, y))
         is at most `tol`, where change = |C xor D| / |C and D|: strikes in only one of the
         two, per shared strike. That is 1/J - 1 for Jaccard similarity J = |C and D| / |C or D|.
-        Exact; replays the sweep within C's full-box component."""
+        Exact; replays the sweep within C's full-box component. Also returns `best`: for
+        each strike in `union`, the highest Jaccard similarity to C of a cluster holding it."""
+        if not 0 <= tol < 1:
+            raise ValueError("Change tolerance must be at least 0% and below 100%")
         members = self._members(cid, x, y)
         key = (int(self.hash[cid]), int(self.size[cid]))
         comp = np.flatnonzero(self.full == self.full[np.flatnonzero(members)[0]])
         local = np.full(self.n, -1); local[comp] = np.arange(len(comp))
         e = (local[self.ei] >= 0)
         c_size = key[1]
-        ov, union = overlaps(len(comp), local[self.ei[e]], local[self.ej[e]], self.ed[e], self.eg[e],
-                             self.km, members[comp], self.zob[comp], c_size, tol,
-                             self._hash_sorted, self._size_sorted)
+        ov, union, best = overlaps(len(comp), local[self.ei[e]], local[self.ej[e]], self.ed[e], self.eg[e],
+                                   self.km, members[comp], self.zob[comp], c_size, tol,
+                                   self._hash_sorted, self._size_sorted, progress=progress)
         # `ov` already holds only clusters within the tolerance.
         khash = np.fromiter((k[0] for k in ov), np.int64, len(ov))
         ksize = np.fromiter((k[1] for k in ov), np.int64, len(ov))
@@ -203,48 +254,48 @@ class Loaded:
         keep = found >= 0
         ids = found[keep]
         change = ((c_size + ksize - 2 * o) / o)[keep]
-        lo, hi = self._diagonal(ids, x, y)
         sz = self.size[ids]
+        stability = self._area(ids)
         union |= members[comp]
         return {"cluster": int(cid), "tol": tol, "ids": ids.astype(np.int32),
-                "union": comp[union].astype(np.int32),
+                "union": comp[union].astype(np.int32), "best": best[union],
                 "max_change": float(change.max()) if len(change) else 0.0, "count": len(ids),
-                "min_size": int(sz.min()), "max_size": int(sz.max()), "below": lo, "above": hi}
+                "min_size": int(sz.min()), "max_size": int(sz.max()), "stability": stability}
 
-    def cluster_geojson(self, cid, x, y, tol):
+    def _area(self, cids):
+        """Area of the union of the given similar clusters' regions, as a fraction of the
+        computed box (max distance x max gap). Exact: the regions never overlap (see below)."""
+        if not len(cids):
+            return 0.0
+        starts, ends = self.off[cids], self.off[np.asarray(cids) + 1]
+        idx = np.concatenate([np.arange(a, b) for a, b in zip(starts, ends)])
+        R = np.clip(self.rows[idx] / np.array([self.mins, self.mins, self.km, self.km]), 0.0, 1.0)
+        # Rows of one cluster never overlap, and with change < 100% two similar clusters
+        # never coexist (they would be disjoint, yet each holds over half of C).
+        return float(np.sum((R[:, 1] - R[:, 0]) * (R[:, 3] - R[:, 2])))
+
+    def stability(self, cid, x, y, tol):
+        """Area of the union of the regions of clusters within change `tol` of cluster `cid`
+        (which exists at (x, y)), as a fraction of the computed box."""
+        return self.similar(cid, x, y, tol)["stability"]
+
+    def cluster_geojson(self, cid, x, y, tol, progress=None):
         """GeoJSON FeatureCollection of cluster C (`cid`, existing at (x, y)) plus the extra
         strikes of clusters within change `tol` of it. Each extra strike gets
         `in_peripheral_cluster_with_similarity`: the Jaccard similarity to C of the most
         similar such cluster containing it. Original properties are kept when stored."""
+        report = progress or (lambda f: None)
         members = self._members(cid, x, y)
-        sim = self.similar(cid, x, y, tol)
+        sim = self.similar(cid, x, y, tol, progress=lambda f: report(0.8 * f))
         union = np.zeros(self.n, bool); union[sim["union"]] = True
         union |= members
-        best = np.zeros(self.n)
-        # Each similar cluster D is a component at the low corner of any of its rows. D lies
-        # inside the union, so components of the union-induced graph find it exactly.
+        best = np.zeros(self.n); best[sim["union"]] = sim["best"]
         idx = np.flatnonzero(union)
-        local = np.full(self.n, -1); local[idx] = np.arange(len(idx))
-        li, lj = local[self.ei], local[self.ej]
-        e = (li >= 0) & (lj >= 0)
-        li, lj, ed, eg, zob = li[e], lj[e], self.ed[e], self.eg[e], self.zob[idx]
-        c_local = members[idx]
-        for d in sim["ids"]:
-            if d == cid:
-                continue
-            ylo, _, xlo, _ = self.rows[self.off[d]]
-            p = (ed <= xlo) & (eg <= ylo)
-            nc, lab = connected_components(
-                coo_matrix((np.ones(p.sum()), (li[p], lj[p])), shape=(len(idx), len(idx))), directed=False)
-            h = np.zeros(nc, np.int64); np.bitwise_xor.at(h, lab, zob)
-            hit = np.flatnonzero((h == self.hash[d]) & (np.bincount(lab, minlength=nc) == self.size[d]))
-            if not len(hit):  # would mean a bug: every similar cluster has a region
-                continue
-            dm = lab == hit[0]
-            jac = (dm & c_local).sum() / (dm | c_local).sum()
-            best[idx[dm]] = np.maximum(best[idx[dm]], jac)
         feats = []
-        for k in idx:  # strikes are stored in time order
+        step = max(1, len(idx) // 50)
+        for q, k in enumerate(idx):  # strikes are stored in time order
+            if q % step == 0:
+                report(0.8 + 0.2 * q / len(idx))
             if self.props is not None:
                 b, o = self.props
                 props = json.loads(bytes(b[o[k]:o[k + 1]]).decode())
@@ -259,31 +310,6 @@ class Loaded:
             "analysis": self.meta["id"], "file": self.meta["params"]["file"],
             "distance_km": x * self.km, "gap_min": y * self.mins, "change_tolerance": tol,
             "strikes": int(members.sum()), "peripheral_strikes": int(union.sum() - members.sum()),
-            "similar_clusters": int(sim["count"]), "properties_preserved": self.props is not None}
+            "similar_clusters": int(sim["count"]), "stability": sim["stability"],
+            "properties_preserved": self.props is not None}
         return {"type": "FeatureCollection", "metadata": meta, "features": feats}
-
-    def _diagonal(self, cids, x, y):
-        """Normalized extent (down, up) along the line (x+s, y+s) of the union of
-        the given clusters' regions (one cluster, or a set of similar clusters)."""
-        R = np.concatenate([self.rows[self.off[c]:self.off[c + 1]] for c in cids])
-        X, Y = x * self.km, y * self.mins
-        # Row (ylo, yhi, xlo, xhi) contains (X + s*km, Y + s*min) for s in [a, b).
-        a = np.maximum((R[:, 2] - X) / self.km, (R[:, 0] - Y) / self.mins)
-        b = np.minimum((R[:, 3] - X) / self.km, (R[:, 1] - Y) / self.mins)
-        ok = a < b
-        a, b = a[ok], b[ok]
-        o = np.argsort(a)
-        a, b = a[o], b[o]
-        # Merge sorted pieces into blocks; keep the block containing s = 0.
-        lo = hi = None
-        for p, q in zip(a, b):
-            if hi is None or p > hi + 1e-12:
-                if lo is not None and lo <= 1e-12 and hi >= -1e-12:
-                    break  # the block holding 0 is complete
-                lo, hi = p, q
-            else:
-                hi = max(hi, q)
-        if lo is None or not (lo <= 1e-12 and hi >= -1e-12):
-            lo = hi = 0.0
-        lim = min(1 - x, 1 - y)  # the computed box ends here along the diagonal
-        return float(-lo), float(min(hi, lim))

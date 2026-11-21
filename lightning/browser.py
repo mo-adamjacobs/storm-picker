@@ -44,10 +44,10 @@ def summary_of(blob):
     return json.dumps(analysis.read_summary(bytes(blob.to_py())))
 
 
-def open_analysis(blob):
+def open_analysis(blob, progress=None):
     global OPEN
     OPEN = None  # free the previous analysis first
-    OPEN = analysis.Loaded(bytes(blob.to_py()))
+    OPEN = analysis.Loaded(bytes(blob.to_py()), (lambda f: progress(f)) if progress else None)
     return json.dumps(OPEN.meta), OPEN.payload()
 
 
@@ -66,8 +66,17 @@ def select(x, y):
 def similar(cluster, x, y, tol):
     r = _open().similar(int(cluster), float(x), float(y), float(tol))
     union, ids = r.pop("union"), r.pop("ids")
+    r.pop("best")
     return json.dumps(r), union, ids
 
 
-def cluster_geojson(cluster, x, y, tol):
-    return json.dumps(_open().cluster_geojson(int(cluster), float(x), float(y), float(tol)))
+def stability(cluster, x, y, tol):
+    return float(_open().stability(int(cluster), float(x), float(y), float(tol)))
+
+
+def cluster_geojson(cluster, x, y, tol, title=None, progress=None):
+    g = _open().cluster_geojson(int(cluster), float(x), float(y), float(tol),
+                                progress=(lambda f: progress(f)) if progress else None)
+    if title:
+        g["metadata"]["name"] = str(title)
+    return json.dumps(g)

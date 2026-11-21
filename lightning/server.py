@@ -1,10 +1,10 @@
-"""Serve the lightning explorer page locally. The analysis itself runs in the browser.
+"""Serve the Storm picker page locally. The analysis itself runs in the browser.
 
 Any static file server works if it serves lightning/static/ at / (including wheels/, the
 Rust sweep built for Pyodide) and the Python modules in lightning/ at /py/ (the browser
 worker loads them into Pyodide). This one does that.
 
-Run: uv run lightning-explorer   (http://127.0.0.1:8765)
+Run: uv run storm-picker   (http://127.0.0.1:8765)
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def main():
     a = ap.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     url = f"http://127.0.0.1:{a.port}/"
-    print(f"Lightning explorer on {url}", flush=True)
+    print(f"Storm picker on {url}", flush=True)
     if not a.no_browser:
         webbrowser.open(url)
     server.serve_forever()

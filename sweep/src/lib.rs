@@ -413,22 +413,27 @@ struct Overlaps {
     size: Vec<i64>,
     count: Vec<i64>,
     union: Vec<u8>,
+    best: Vec<f64>, // per strike: highest Jaccard similarity to C of a reported cluster holding it
 }
 
 /// Clusters D whose change from the marked cluster C, |C xor D| / |C and D|, is at most
 /// `tol` and which are real regions (present in the sorted (hash, size) table): their key
-/// and |C and D|. Also the union of their strikes.
+/// and |C and D|. Also the union of their strikes, and for each strike the highest Jaccard
+/// similarity |C and D| / |C or D| of those clusters containing it (0 if none).
 fn overlaps_impl(
     ei: &[i32], ej: &[i32], dist: &[f64], gap: &[f64], max_dist: f64, tags: &[i64],
     marked: &[u8], c_size: i64, tol: f64, sorted_hash: &[i64], sorted_size: &[i64],
-) -> Overlaps {
+    mut progress: impl FnMut(f64) -> PyResult<()>,
+) -> PyResult<Overlaps> {
     let n = tags.len();
     let cnt: Vec<i64> = marked.iter().map(|&m| (m != 0) as i64).collect();
     let mut t = Tree::new(tags, max_dist, Some(cnt));
     let order = gap_order(gap);
     let mut out: Map<Key, i64> = Map::default();
     let mut union = vec![0u8; n];
-    let mut done: Vec<bool> = Vec::new(); // every leaf under the node is already in union
+    let mut best = vec![0.0f64; n];
+    // cover[v]: every leaf under node v already has best >= cover[v] (reset on change).
+    let mut cover: Vec<f64> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let exists = |key: Key| -> bool {
         let (mut lo, mut hi) = (0usize, sorted_hash.len());
@@ -438,16 +443,20 @@ fn overlaps_impl(
         }
         lo < sorted_hash.len() && (sorted_hash[lo], sorted_size[lo]) == key
     };
-    for &e in &order {
+    let step = (order.len() / 100).max(1);
+    for (k, &e) in order.iter().enumerate() {
+        if k % step == 0 {
+            progress(k as f64 / order.len() as f64)?;
+        }
         if !t.prepare(ei[e] as usize, ej[e] as usize, dist[e]) {
             continue;
         }
         t.apply();
-        if done.len() < t.len() {
-            done.resize(t.len(), false);
+        if cover.len() < t.len() {
+            cover.resize(t.len(), -1.0);
         }
         for i in 0..t.chain.len() {
-            done[t.chain[i]] = false; // its subtree just changed
+            cover[t.chain[i]] = -1.0; // its subtree just changed
         }
         for i in 0..t.chain.len() {
             let w = t.chain[i];
@@ -459,14 +468,18 @@ fn overlaps_impl(
             let change = (c_size + key.1 - 2 * c) as f64 / c as f64;
             if change <= tol + 1e-12 && exists(key) {
                 out.insert(key, c); // only clusters within the tolerance are reported
-                // Collect w's strikes; every node visited ends up fully collected.
+                let jac = c as f64 / (c_size + key.1 - c) as f64;
+                // Raise w's strikes to jac; every node visited ends up covered at jac.
                 stack.clear();
                 stack.push(w);
                 while let Some(v) = stack.pop() {
                     if v < n {
                         union[v] = 1;
-                    } else if !done[v] {
-                        done[v] = true;
+                        if jac > best[v] {
+                            best[v] = jac;
+                        }
+                    } else if cover[v] < jac {
+                        cover[v] = jac;
                         stack.extend_from_slice(&t.kids[v]);
                     }
                 }
@@ -483,7 +496,7 @@ fn overlaps_impl(
         size.push(s);
         count.push(c);
     }
-    Overlaps { hash, size, count, union }
+    Ok(Overlaps { hash, size, count, union, best })
 }
 
 // ---------------------------------------------------------------- edge reduction
@@ -651,21 +664,30 @@ fn cluster_regions<'py>(
     Ok((bytes_of(py, &r.hash), bytes_of(py, &r.size), bytes_of(py, &r.rows), bytes_of(py, &r.off)))
 }
 
-/// overlaps(ei, ej, dist, gap, max_dist, tags, marked, c_size, tol, sorted_hash, sorted_size)
-/// -> (hash bytes[i64], size bytes[i64], count bytes[i64], union bytes[u8])
+/// overlaps(ei, ej, dist, gap, max_dist, tags, marked, c_size, tol, sorted_hash, sorted_size,
+///          progress=None)
+/// -> (hash bytes[i64], size bytes[i64], count bytes[i64], union bytes[u8], best bytes[f64])
 #[pyfunction]
+#[pyo3(signature = (ei, ej, dist, gap, max_dist, tags, marked, c_size, tol, sorted_hash, sorted_size, progress=None))]
 #[allow(clippy::too_many_arguments)]
 fn overlaps<'py>(
     py: Python<'py>, ei: PyBuffer<i32>, ej: PyBuffer<i32>, dist: PyBuffer<f64>, gap: PyBuffer<f64>,
     max_dist: f64, tags: PyBuffer<i64>, marked: PyBuffer<u8>, c_size: i64, tol: f64,
-    sorted_hash: PyBuffer<i64>, sorted_size: PyBuffer<i64>,
-) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+    sorted_hash: PyBuffer<i64>, sorted_size: PyBuffer<i64>, progress: Option<Bound<'py, PyAny>>,
+) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
     let o = overlaps_impl(
         &ei.to_vec(py)?, &ej.to_vec(py)?, &dist.to_vec(py)?, &gap.to_vec(py)?, max_dist,
         &tags.to_vec(py)?, &marked.to_vec(py)?, c_size, tol, &sorted_hash.to_vec(py)?,
         &sorted_size.to_vec(py)?,
-    );
-    Ok((bytes_of(py, &o.hash), bytes_of(py, &o.size), bytes_of(py, &o.count), bytes_of(py, &o.union)))
+        |f| {
+            if let Some(cb) = &progress {
+                cb.call1((f,))?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok((bytes_of(py, &o.hash), bytes_of(py, &o.size), bytes_of(py, &o.count), bytes_of(py, &o.union),
+        bytes_of(py, &o.best)))
 }
 
 /// reduce(n, ei, ej, dist, gap, batch, progress=None) -> kept edge indices bytes[i64]

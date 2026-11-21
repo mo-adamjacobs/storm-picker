@@ -1,12 +1,12 @@
 [project]
-name = "lightning-persistence"
+name = "storm-picker"
 version = "0.1.0"
 description = "Explore lightning with geographic-distance / time-gap bifiltrations"
 requires-python = ">=3.11"
 dependencies = ["numpy>=2", "scipy>=1.12", "lightning-sweep"]
 
 [project.scripts]
-lightning-explorer = "lightning.server:main"
+storm-picker = "lightning.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

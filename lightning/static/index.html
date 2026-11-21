@@ -3,14 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lightning persistence</title>
+<title>Storm picker</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>Lightning persistence</h1>
+  <h1>Storm picker</h1>
   <div id="current" class="muted">No analysis open</div>
+  <progress id="open-bar" max="1" hidden></progress>
   <div class="spacer"></div>
   <span id="py-status" class="small muted" hidden></span>
   <span id="py-warning" class="small error" hidden></span>
@@ -36,16 +37,19 @@
 
   <section class="panel" id="map-panel">
     <h2>Strikes</h2>
-    <p class="muted small">Scroll to zoom, drag to pan. Click a strike to pick its cluster; double-click (here or in the list) to limit the time range to it. Basemap © Esri.</p>
+    <p class="muted small">Scroll to zoom, drag to pan. Click a strike to pick its cluster; double-click (here or in the list) to frame it and limit the time range to it. Scroll on the time slider to zoom it. Basemap © Esri.</p>
     <div class="plot"><div id="map"></div></div>
     <div class="range">
       <label class="small">Shown time range</label>
       <div class="trange" id="trange">
         <div class="trange-track"></div>
+        <div class="trange-pick sim" id="t-sim" hidden title="Time extent of the clusters within the change tolerance"></div>
         <div class="trange-pick" id="t-pick" hidden title="Time extent of the picked cluster (double-click it to zoom the range)"></div>
         <div class="trange-sel" id="t-sel" title="Drag to move the window"></div>
         <div class="trange-handle" id="t-lo" role="slider" tabindex="0" aria-label="Start of shown time range"></div>
         <div class="trange-handle" id="t-hi" role="slider" tabindex="0" aria-label="End of shown time range"></div>
+        <div class="trange-more l" id="t-more-l" hidden title="Zoomed in: earlier times are off this end (scroll to zoom out)">‹</div>
+        <div class="trange-more r" id="t-more-r" hidden title="Zoomed in: later times are off this end (scroll to zoom out)">›</div>
       </div>
       <div class="small"><span id="t-lo-l"></span> → <span id="t-hi-l"></span> · <span id="t-count"></span></div>
     </div>
@@ -54,7 +58,7 @@
   <aside class="panel" id="side">
     <h2>Clusters</h2>
     <label class="tol small">Treat as the same cluster if change ≤
-      <input id="tol" type="number" min="0" step="5" value="20"> %</label>
+      <input id="tol" type="number" min="0" max="99" step="5" value="20"> %</label>
     <div id="sel-head" class="muted small">Click the persistence map to list the clusters there.</div>
     <ul id="features"></ul>
   </aside>
@@ -99,8 +103,8 @@
       <label>End (UTC) <input id="f-end" type="datetime-local" step="1" required></label>
     </div>
     <div class="row">
-      <label>Max distance (km) <input id="f-km" type="number" min="0.1" step="any" value="25" required></label>
-      <label>Max time gap (min) <input id="f-min" type="number" min="0.1" step="any" value="15" required></label>
+      <label>Max distance (km) <input id="f-km" type="number" min="0.1" step="any" value="200" required></label>
+      <label>Max time gap (min) <input id="f-min" type="number" min="0.1" step="any" value="60" required></label>
     </div>
     <div id="f-count" class="muted small"></div>
     <div id="job" hidden>
@@ -111,6 +115,22 @@
     <div class="actions">
       <button type="button" id="f-cancel">Close</button>
       <button type="submit" id="f-run">Run</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-save">
+  <form method="dialog" id="form-save">
+    <h2>Save cluster</h2>
+    <label>Title (saved as metadata.name)
+      <input id="s-title" type="text" required></label>
+    <div id="s-info" class="muted small"></div>
+    <div id="s-status" class="small"></div>
+    <progress id="s-bar" max="1" value="0" hidden></progress>
+    <div id="s-error" class="error small"></div>
+    <div class="actions">
+      <button type="button" id="s-cancel">Cancel</button>
+      <button type="submit" id="s-save">Save…</button>
     </div>
   </form>
 </dialog>

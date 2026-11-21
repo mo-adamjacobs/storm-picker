@@ -3,7 +3,6 @@
 // Loaded as a module worker: new Worker("worker.js", { type: "module" }).
 
 const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/"; // CI reads this version to build the Rust wheel (.github/workflows/pages.yml)
-const { loadPyodide } = await import(PYODIDE + "pyodide.mjs");
 
 const PY_FILES = ["__init__.py", "data.py", "graph.py", "regions.py", "analysis.py", "browser.py"];
 let pyodide = null, B = null; // B: the lightning.browser module
@@ -12,8 +11,11 @@ const status = (text) => self.postMessage({ type: "status", text });
 const progress = (stage, fraction) =>
   self.postMessage({ type: "progress", stage, fraction: fraction == null ? null : Number(fraction) });
 
+// No top-level await: self.onmessage (below) must be attached as soon as the module runs,
+// or messages the page sends during Pyodide's download are dropped and never answered.
 const ready = (async () => {
   status("Starting Python…");
+  const { loadPyodide } = await import(PYODIDE + "pyodide.mjs");
   pyodide = await loadPyodide({ indexURL: PYODIDE });
   status("Loading NumPy and SciPy…");
   await pyodide.loadPackage(["numpy", "scipy"]);
@@ -114,8 +116,13 @@ const commands = {
   },
 
   async open(id) {
+    // Stages: read from storage 0-5%, load in Python 5-95%, hand over arrays 95-100%.
+    const report = (f) => self.postMessage({ type: "openProgress", fraction: Number(f) });
+    report(0);
     const bytes = await readFile(`${id}.npz`);
-    const [metaJson, payload] = items(B.open_analysis(bytes));
+    report(0.05);
+    const [metaJson, payload] = items(B.open_analysis(bytes, (f) => report(0.05 + 0.9 * f)));
+    report(0.95);
     const out = { meta: JSON.parse(metaJson) };
     for (const k of ["t", "lat", "lon", "rows", "row_off", "size"]) out[k] = typed(payload.get(k));
     out.t0 = payload.get("t0");
@@ -133,8 +140,13 @@ const commands = {
     return Object.assign(JSON.parse(json), { union: typed(union), ids: typed(ids) });
   },
 
-  async clusterGeojson(cluster, x, y, tol) {
-    return B.cluster_geojson(cluster, x, y, tol);
+  async stability(cluster, x, y, tol) {
+    return B.stability(cluster, x, y, tol);
+  },
+
+  async clusterGeojson(cluster, x, y, tol, title) {
+    const report = (f) => self.postMessage({ type: "saveProgress", fraction: Number(f) });
+    return B.cluster_geojson(cluster, x, y, tol, title, report);
   },
 
   async remove(id) {

@@ -82,7 +82,7 @@ main {
 .legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .legend canvas { height: 10px; width: 140px; border-radius: 2px; }
 .range { margin-top: 8px; }
-.trange { position: relative; height: 28px; margin: 4px 8px; touch-action: none; user-select: none; }
+.trange { position: relative; height: 28px; margin: 4px 16px; touch-action: none; user-select: none; }
 .trange-track { position: absolute; left: 0; right: 0; top: 12px; height: 4px; border-radius: 2px; background: var(--border); }
 .trange-sel {
   position: absolute; top: 8px; height: 12px; border-radius: 4px; cursor: grab;
@@ -93,6 +93,13 @@ main {
   position: absolute; top: 4px; width: 12px; height: 20px; margin-left: -6px; border-radius: 4px;
   background: var(--surface-1); border: 2px solid var(--accent); cursor: ew-resize;
 }
+.trange-handle.out { opacity: .45; }
+.trange-more {
+  position: absolute; top: 2px; font: 700 18px/22px system-ui, sans-serif; color: var(--accent);
+  pointer-events: none;
+}
+.trange-more.l { left: -16px; }
+.trange-more.r { right: -16px; }
 .trange-handle:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 1px; }
 #side { overflow: hidden; }
 #features { list-style: none; margin: 8px 0 0; padding: 0; overflow-y: auto; flex: 1; }
@@ -141,6 +148,7 @@ code { font-size: 12px; }
 .hjob progress { width: 140px; }
 .hjob.err { color: var(--error); }
 header h1, header button, .hjob { white-space: nowrap; flex-shrink: 0; }
+#open-bar { width: 120px; flex-shrink: 0; }
 #current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #map { position: absolute; inset: 0; border-radius: 6px; background: var(--surface-0); }
 .strike-overlay { position: absolute; left: 0; top: 0; z-index: 450; pointer-events: none; }
@@ -152,5 +160,6 @@ label.button { display: inline-block; }
 #py-status { white-space: nowrap; }
 dialog label.button { display: inline-block; flex: none; font-size: 14px; color: var(--text-primary); }
 .trange-pick { position: absolute; top: 11px; height: 6px; min-width: 3px; border-radius: 2px; pointer-events: none; z-index: 1; }
+.trange-pick.sim { top: 9px; height: 10px; border-radius: 3px; }
 .trange-sel { z-index: 0; }
 .trange-handle { z-index: 2; }
