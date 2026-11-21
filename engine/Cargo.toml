@@ -1,0 +1,20 @@
+[package]
+name = "storm-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Exact 2-parameter (distance, time gap) clustering of lightning strikes"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+geographiclib-rs = "0.2.7"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = true
+panic = "abort"
+
+[profile.test]
+opt-level = 2

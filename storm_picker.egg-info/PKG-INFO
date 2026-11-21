@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: storm-picker
+Version: 0.1.0
+Summary: Explore lightning with geographic-distance / time-gap bifiltrations
+Requires-Python: >=3.11
+Requires-Dist: numpy>=2
+Requires-Dist: scipy>=1.12
+Requires-Dist: lightning-sweep

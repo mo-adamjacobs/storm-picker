@@ -1,0 +1,40 @@
+{
+ "id": "20261121-020807-6e4ce4",
+ "format": 3,
+ "created": "2026-11-21T02:08:08.096938Z",
+ "params": {
+  "file": "gonzalo-2014-10-11_20.geojson",
+  "start": "2014-10-11T00:00:00Z",
+  "end": "2014-10-11T23:59:59.999999Z",
+  "max_km": 25.0,
+  "max_min": 15.0
+ },
+ "source": {
+  "name": "WWLLN strikes, HS3 storm box for Hurricane Gonzalo, 2014-10-11 to 2014-10-20",
+  "kind": "Observed lightning (World Wide Lightning Location Network)",
+  "source": "NASA GHRC DAAC, HS3 WWLLN Storms V1, doi:10.5067/HS3/WWLN/DATA201",
+  "files": [
+   "AE20141011.Gonzalo.loc",
+   "AE20141012.Gonzalo.loc",
+   "AE20141013.Gonzalo.loc",
+   "AE20141014.Gonzalo.loc",
+   "AE20141015.Gonzalo.loc",
+   "AE20141016.Gonzalo.loc",
+   "AE20141017.Gonzalo.loc",
+   "AE20141018.Gonzalo.loc",
+   "AE20141019.Gonzalo.loc",
+   "AE20141020.Gonzalo.loc"
+  ],
+  "coverage": "Fixed box approx. 16-54N, 69-31W; includes convection other than Gonzalo",
+  "property_note": "Only time/lat/lon verified. Other property names follow the usual WWLLN AE column order and are not checked against the HS3 ASCII documentation."
+ },
+ "strikes": 10123,
+ "first": "2014-10-11T00:00:00.952317Z",
+ "last": "2014-10-11T23:59:24.857121Z",
+ "candidate_edges": 388056,
+ "kept_edges": 84802,
+ "clusters": 122927,
+ "features": 4791,
+ "regions": 187482,
+ "seconds": 4.7
+}

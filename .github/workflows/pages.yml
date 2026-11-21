@@ -1,7 +1,8 @@
 # Build the browser site and publish it to GitHub Pages.
 #
-# The site is static: lightning/static/ (page, worker), lightning/*.py served under py/
-# (loaded into Pyodide by the worker) and the Rust sweep built as a Pyodide wheel.
+# The site is static: web/ (page, worker) plus the Rust engine compiled to WebAssembly
+# (web/engine.wasm, built by build.sh). The engine is single-threaded, so no special
+# headers (COOP/COEP) are needed.
 name: Pages
 
 on:
@@ -24,47 +25,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The Pyodide version the page loads decides everything else (Python, Emscripten,
-      # Rust toolchain), so read it from worker.js rather than repeating it here.
-      - name: Read Pyodide version
-        id: pyodide
-        run: |
-          v=$(grep -oP 'pyodide/v\K[0-9.]+(?=/full)' lightning/static/worker.js)
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Pyodide $v"
+      - name: Install Rust with the WebAssembly target
+        run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
+      - name: Test the engine
+        run: cargo test --manifest-path engine/Cargo.toml --release
 
-      - name: Install pyodide-build
-        run: pip install pyodide-cli pyodide-build
-
-      - name: Cache Pyodide build environment and Emscripten
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pyodide-build
-          key: pyodide-xbuildenv-${{ steps.pyodide.outputs.version }}-${{ runner.os }}
-
-      - name: Install build environment, Emscripten and Rust toolchain
-        run: |
-          pyodide xbuildenv install "${{ steps.pyodide.outputs.version }}"
-          pyodide xbuildenv install-emscripten
-          rust="$(pyodide config get rust_toolchain)"
-          rustup toolchain install "$rust" --profile minimal --target wasm32-unknown-emscripten
-
-      - name: Build the Rust sweep for Pyodide
-        run: ./sweep/build-pyodide.sh
+      - name: Build the engine
+        run: ./build.sh
 
       - name: Assemble site
         run: |
-          mkdir -p _site/py
-          cp lightning/static/index.html lightning/static/app.js lightning/static/worker.js \
-             lightning/static/style.css _site/
-          cp -r lightning/static/wheels _site/wheels
-          cp lightning/*.py _site/py/
-          test -s _site/wheels/manifest.json
-          ls -R _site
+          mkdir -p _site
+          cp web/index.html web/app.js web/worker.js web/engine.js web/style.css web/engine.wasm _site/
+          ls -l _site
 
       - uses: actions/upload-pages-artifact@v3
         with:

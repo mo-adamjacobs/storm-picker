@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storm picker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Storm picker</h1>
+  <div id="current" class="muted">No strikes loaded</div>
+  <div class="spacer"></div>
+  <span id="eng-status" class="small muted" hidden></span>
+  <div id="busy" class="busy small" hidden>
+    <span id="busy-text"></span>
+    <progress id="busy-bar" max="1"></progress>
+  </div>
+  <button id="btn-new">Load strikes…</button>
+</header>
+
+<main id="view" hidden>
+  <section class="panel" id="pers-panel">
+    <h2>Persistence map</h2>
+    <p class="muted small">Click to select time and distance thresholds for clustering. The inner region (not always visible) is where the
+      exact selected cluster exists, outer region is where a cluster within the given tolerance (right side of screen)
+      exists, and dotted line is where all strikes join into a single cluster.</p>
+    <p class="muted small">"Stability" is the proportion of the outer region's area relative to the whole box.</p>
+    <div class="plot">
+      <canvas id="pers"></canvas>
+      <div id="pers-tip" class="tip" hidden></div>
+    </div>
+  </section>
+
+  <section class="panel" id="map-panel">
+    <h2>Strikes</h2>
+    <p class="muted small">Scroll to zoom, drag to pan. Click a strike to pick its cluster; double-click (here or in the list) to frame it and limit the time range to it. Scroll on the time slider to zoom it. Basemap © Esri.</p>
+    <div class="plot"><div id="map"></div></div>
+    <div class="range">
+      <label class="small">Shown time range</label>
+      <div class="trange" id="trange">
+        <div class="trange-track"></div>
+        <div class="trange-pick sim" id="t-sim" hidden title="Time extent of the clusters within the change tolerance"></div>
+        <div class="trange-pick" id="t-pick" hidden title="Time extent of the picked cluster (double-click it to zoom the range)"></div>
+        <div class="trange-sel" id="t-sel" title="Drag to move the window"></div>
+        <div class="trange-handle" id="t-lo" role="slider" tabindex="0" aria-label="Start of shown time range"></div>
+        <div class="trange-handle" id="t-hi" role="slider" tabindex="0" aria-label="End of shown time range"></div>
+        <div class="trange-more l" id="t-more-l" hidden title="Zoomed in: earlier times are off this end (scroll to zoom out)">‹</div>
+        <div class="trange-more r" id="t-more-r" hidden title="Zoomed in: later times are off this end (scroll to zoom out)">›</div>
+      </div>
+      <div class="small"><span id="t-lo-l"></span> → <span id="t-hi-l"></span> · <span id="t-count"></span></div>
+    </div>
+  </section>
+
+  <aside class="panel" id="side">
+    <h2>Clusters</h2>
+    <div class="tol small">
+      <label class="tol-row"><span>Tolerance:</span>
+        <span><input id="tol" type="number" min="0" max="99" step="5" value="20" autocomplete="off"> %</span></label>
+      <div class="tol-caption">(1/J - 1 where J is
+        <a href="https://en.wikipedia.org/wiki/Jaccard_index" target="_blank" rel="noopener">Jaccard index</a>)</div>
+    </div>
+    <div id="sel-head" class="muted small">Click the persistence map to list the clusters there.</div>
+    <ul id="features"></ul>
+  </aside>
+</main>
+
+<div id="empty" class="emptystate">
+  <p><b>Load</b> a GeoJSON strike file to start. Everything runs in this browser.</p>
+  <div class="geojson-example"><div class="cap">Example GeoJSON:</div><pre><code>{
+  <span class="k">"type"</span>: <span class="s">"FeatureCollection"</span>,
+  <span class="k">"metadata"</span>: { <span class="k">"name"</span>: <span class="s">"Optional label"</span> },
+  <span class="k">"features"</span>: [
+    {
+      <span class="k">"type"</span>: <span class="s">"Feature"</span>,
+      <span class="k">"geometry"</span>: { <span class="k">"type"</span>: <span class="s">"Point"</span>, <span class="k">"coordinates"</span>: [<span class="n">-64.8</span>, <span class="n">32.3</span>] },
+      <span class="k">"properties"</span>: {
+        <span class="k">"time"</span>: <span class="s">"2014-10-17T12:34:56.789Z"</span>,
+        <span class="k">"peak_current"</span>: <span class="n">31</span>, <span class="c">// Extra properties accepted but ignored</span>
+        …
+      }
+    },
+    {
+      <span class="k">"type"</span>: <span class="s">"Feature"</span>,
+      <span class="k">"geometry"</span>: { <span class="k">"type"</span>: <span class="s">"Point"</span>, <span class="k">"coordinates"</span>: [<span class="n">-64.7</span>, <span class="n">32.4</span>] },
+      <span class="k">"properties"</span>: {
+        <span class="k">"time"</span>: <span class="s">"2014-10-17T12:35:02.104Z"</span>,
+        …
+      }
+    },
+    …
+  ]
+}</code></pre></div>
+</div>
+
+<dialog id="dlg-new">
+  <form method="dialog" id="form-new">
+    <h2>Load strikes</h2>
+    <label>Strike file (GeoJSON Points with properties.time)
+      <input id="f-file" type="file" accept=".geojson,.json,application/geo+json"></label>
+    <p class="muted small">Opens on the whole time range; narrow it with the slider.</p>
+    <div id="f-error" class="error small"></div>
+    <div class="actions">
+      <button type="button" id="f-cancel">Close</button>
+      <button type="submit" id="f-run">Open</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-save">
+  <form method="dialog" id="form-save">
+    <h2>Save cluster</h2>
+    <label>Title (saved as metadata.name)
+      <input id="s-title" type="text" required></label>
+    <div id="s-info" class="muted small"></div>
+    <div id="s-status" class="small"></div>
+    <progress id="s-bar" max="1" value="0" hidden></progress>
+    <div id="s-error" class="error small"></div>
+    <div class="actions">
+      <button type="button" id="s-cancel">Cancel</button>
+      <button type="submit" id="s-save">Save…</button>
+    </div>
+  </form>
+</dialog>
+
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="app.js"></script>
+</body>
+</html>

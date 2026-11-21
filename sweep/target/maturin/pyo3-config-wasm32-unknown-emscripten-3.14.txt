@@ -1,0 +1,7 @@
+implementation=CPython
+version=3.14
+target_abi=CPython-gil_enabled-3.14
+shared=true
+build_flags=
+suppress_build_script_link_lines=false
+lib_dir=/home/adam/.cache/pyodide-build/.pyodide-xbuildenv-fb821cbe12c0/314.0.7/xbuildenv/pyodide-root/cpython/installs/python-3.14.2/sysconfigdata
