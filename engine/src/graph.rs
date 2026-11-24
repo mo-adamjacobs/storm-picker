@@ -292,7 +292,7 @@ impl Graph {
         // Components of the stored edges at each level, and those as of the band's start.
         let mut uf: Vec<Vec<u32>> = (0..l).map(|_| (0..n as u32).collect()).collect();
         let mut comp = vec![0u32; n * l];
-        let mut tree = Tree::new(&vec![0u64; n], f64::INFINITY, None);
+        let mut tree = Tree::new(n, f64::INFINITY, None);
         let mut cand: Vec<(f64, f64, u32, u32)> = Vec::new();
         let mut stack: Vec<(u32, u32, u32, u32)> = Vec::new();
         let (mut geodesics, mut stats) = (0u64, [0u64; 3]);
@@ -470,7 +470,7 @@ impl Graph {
                         break 'store;
                     }
                     let top = *tree.chain.last().unwrap();
-                    if tree.parent[top] == ROOT {
+                    if tree.parent(top) == ROOT {
                         root = top;
                     }
                     self.ea.push(a);
@@ -490,7 +490,7 @@ impl Graph {
                 // After the last edge at this gap: a frontier corner if all are joined
                 // at a shorter distance than before.
                 if parts == 1 && cand.get(i + 1).is_none_or(|c| c.0 != gap) {
-                    let x = tree.height[root];
+                    let x = tree.height(root);
                     if frontier.last().is_none_or(|&(_, x1)| x < x1) {
                         frontier.push((gap, x));
                     }

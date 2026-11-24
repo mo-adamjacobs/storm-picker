@@ -167,7 +167,7 @@ pub fn minimal(b: &Brute, t: &[f64]) -> Vec<(u32, u32, f64)> {
             .then(p.2.cmp(&q.2))
             .then(p.3.cmp(&q.3))
     });
-    let mut tree = Tree::new(&vec![0u64; b.n], f64::INFINITY, None);
+    let mut tree = Tree::new(b.n, f64::INFINITY, None);
     ps.into_iter()
         .filter(|&(_, d, i, j)| tree.insert(i, j, d))
         .map(|(_, d, i, j)| (i as u32, j as u32, d))

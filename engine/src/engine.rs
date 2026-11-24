@@ -304,7 +304,7 @@ impl Engine {
         let outer = stairs;
         inner.sort_by(|p, q| p.0.total_cmp(&q.0));
         let m = members.len();
-        let mut tree = Tree::new(&vec![0u64; m], f64::INFINITY, None);
+        let mut tree = Tree::new(m, f64::INFINITY, None);
         let mut uf: Vec<u32> = (0..m as u32).collect();
         let (mut parts, mut root, mut b) = (m, 0usize, f64::INFINITY);
         let mut rows = Vec::new();
@@ -327,7 +327,7 @@ impl Engine {
                 }
                 if tree.insert(u as usize, v as usize, d) {
                     let top = *tree.chain.last().unwrap();
-                    if tree.parent[top] == ROOT {
+                    if tree.parent(top) == ROOT {
                         root = top;
                     }
                 }
@@ -337,7 +337,7 @@ impl Engine {
                 o += 1;
             }
             let a = if parts == 1 {
-                tree.height[root]
+                tree.height(root)
             } else {
                 f64::INFINITY
             };
@@ -368,7 +368,9 @@ impl Engine {
     /// threshold the W-cluster of any of its C strikes lies inside D. So whenever a node
     /// holding C's strikes and at most tol·|C| others has an edge leaving W while it
     /// exists, the strike at its other end (and its cluster there) joins W and the sweep
-    /// is repeated; when none does, the result is exact.
+    /// is repeated; when none does, the result is exact. Once W would be over half the
+    /// strikes it becomes all of them instead: one last pass (no edge leaves the whole
+    /// graph), cheaper than two more of the grown W.
     /// `progress(pass + fraction)` reports each pass's progress.
     pub fn similar(
         &mut self,
@@ -462,8 +464,15 @@ impl Engine {
                             }
                         }
                     }
-                    w.extend(&grow);
-                    w.sort_unstable();
+                    // A pass costs about the size of W, and another one is coming. Once W
+                    // would be over half the strikes, two more passes of it cost more than
+                    // one pass over all of them, which no edge leaves (so it is the last).
+                    if 2 * (w.len() + grow.len()) > self.g.n {
+                        w = (0..self.g.n as u32).collect();
+                    } else {
+                        w.extend(&grow);
+                        w.sort_unstable();
+                    }
                     pass += 1;
                 }
             }
@@ -521,7 +530,7 @@ fn majority_sweep(
         outer.extend(ev.iter().map(|&(g, d, x)| (g, d, u as u32, x)));
     }
     outer.sort_by(|p, q| p.0.total_cmp(&q.0));
-    let mut t = Tree::new(&vec![0u64; n], f64::INFINITY, Some(marked.to_vec())).with_low();
+    let mut t = Tree::new(n, f64::INFINITY, Some(marked.to_vec()));
     let half = c_size as f64 / 2.0;
     let mut add: Vec<(u32, f64, f64)> = Vec::new();
     // Outside strikes already in `add` (each is listed once, where first found).
@@ -536,6 +545,7 @@ fn majority_sweep(
     let mut raise: Vec<(usize, f64)> = Vec::new(); // leaves whose minimum to raise
     let mut stamp: Vec<usize> = Vec::new();
     let mut nodes: Vec<usize> = Vec::new();
+    let mut touched: Vec<usize> = Vec::new(); // nodes an insertion changes (reused)
     let (mut level, mut s, mut o) = (0usize, 0usize, 0usize);
     let total = (edges.len() + outer.len()).max(1);
     let step = (total / 100).max(1);
@@ -570,8 +580,9 @@ fn majority_sweep(
             if !t.prepare(u as usize, v as usize, d) {
                 continue;
             }
-            let touched: Vec<usize> = t.touched().collect();
-            for w in touched {
+            touched.clear();
+            touched.extend(t.touched());
+            for &w in &touched {
                 note(&mut stamp, &mut nodes, t.len(), tag, w);
             }
             t.apply();
@@ -601,24 +612,23 @@ fn majority_sweep(
         // outside strike within reach while it exists? Then W must grow.
         let mut majority: Option<usize> = None; // a changed node holding most of C
         for &w in &nodes {
-            if t.parent[w] == FREED {
+            if t.parent(w) == FREED {
                 continue;
             }
-            let c = t.cnt.as_ref().unwrap()[w];
+            let c = t.cnt(w);
             if c as f64 > half {
                 majority = Some(w);
             }
-            if c == 0 || t.size[w] - c > cap {
+            if c == 0 || t.size(w) - c > cap {
                 continue;
             }
             let (lo, hi) = t.interval(w);
             let hi = hi.min(top_x);
-            let low = t.low.as_ref().unwrap();
-            if lo < hi && low[w] < hi {
+            if lo < hi && t.low(w) < hi {
                 stack.clear();
                 stack.push(w);
                 while let Some(v) = stack.pop() {
-                    if low[v] >= hi {
+                    if t.low(v) >= hi {
                         continue;
                     }
                     if v < n {
@@ -638,7 +648,7 @@ fn majority_sweep(
                         }
                         raise.push((v, left));
                     } else {
-                        stack.extend_from_slice(&t.kids[v]);
+                        stack.extend_from_slice(&t.kids(v));
                     }
                 }
                 for &(v, left) in &raise {
@@ -655,13 +665,12 @@ fn majority_sweep(
         }
         // M's chain: nodes holding most of C overlap, so lie on one path. Go down from a
         // changed one to the lowest, then up while the outsiders allow a D.
-        let cnt = t.cnt.as_ref().unwrap();
         let mut v = start;
         while v >= n {
-            let [a, b] = t.kids[v];
-            v = if cnt[a] as f64 > half {
+            let [a, b] = t.kids(v);
+            v = if t.cnt(a) as f64 > half {
                 a
-            } else if cnt[b] as f64 > half {
+            } else if t.cnt(b) as f64 > half {
                 b
             } else {
                 break;
@@ -671,7 +680,7 @@ fn majority_sweep(
         {
             let mut w = v;
             loop {
-                let (c, size) = (cnt[w], t.size[w]);
+                let (c, size) = (t.cnt(w), t.size(w));
                 let out_c = size - c;
                 if out_c > cap {
                     break; // only more outsiders further up
@@ -697,14 +706,14 @@ fn majority_sweep(
                             best[v] = best[v].max(jac);
                         } else if cover[v] < jac {
                             cover[v] = jac;
-                            stack.extend_from_slice(&t.kids[v]);
+                            stack.extend_from_slice(&t.kids(v));
                         }
                     }
                 }
-                if t.parent[w] < 0 {
+                if t.parent(w) < 0 {
                     break;
                 }
-                w = t.parent[w] as usize;
+                w = t.parent(w) as usize;
             }
         }
         if now != state {
